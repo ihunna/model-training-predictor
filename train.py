@@ -13,8 +13,9 @@ This script trains a simple regression model on your dataset (just drop in `data
 
 - Reads your input/output data from JSON
 - Automatically figures out how to shape it for training
+- Normalizes inputs/outputs for better training
 - Trains a small neural net using PyTorch
-- Prints out loss per epoch + simple accuracy (rounded predictions)
+- Prints out loss per epoch + simple exact match accuracy (rounded predictions)
 - Saves your trained model to the `models/` folder
 
 Just upload your dataset, run the file, and download your model. No headaches.
@@ -43,6 +44,10 @@ def main():
 
     X = np.array(inputs, dtype=np.float32).reshape(num_outputs, num_features)
     y = np.array(outputs, dtype=np.float32)
+
+    # Normalize inputs and outputs for better training
+    X = X / 21.0  # input range: 0-21
+    y = y / 2047.0  # output range: 0-2047
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1, random_state=42)
 
@@ -83,7 +88,7 @@ def main():
             loss.backward()
             optimizer.step()
             total_loss += loss.item() * inputs.size(0)
-        print(f"Epoch {epoch+1}, Loss: {total_loss / len(train_loader.dataset):.4f}")
+        print(f"Epoch {epoch+1}, Loss: {total_loss / len(train_loader.dataset):.6f}")
 
 
     model.eval()
@@ -92,12 +97,15 @@ def main():
         for inputs, labels in test_loader:
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = model(inputs).squeeze()
-            preds = torch.round(outputs).int()
-            targets = labels.squeeze().int()
+
+            # Denormalize predictions and labels before rounding
+            preds = torch.round(outputs * 2047).int()
+            targets = torch.round(labels.squeeze() * 2047).int()
+
             correct += (preds == targets).sum().item()
             total += targets.size(0)
 
-    print(f"\n✅ Exact match accuracy: {correct / total:.4f}")
+    print(f"\n✅ Exact match accuracy: {correct / total:.6f}")
 
     os.makedirs("models", exist_ok=True)
     model_path = "models/trained_model.pt"
