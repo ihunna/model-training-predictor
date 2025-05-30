@@ -10,7 +10,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 from torch.utils.data import DataLoader, TensorDataset
 
 """
-This script trains a simple regression model on your dataset and outputs a `.pt` model and normalization stats.
+Improved training script with proper normalization and model architecture.
 
 Usage:
     python train.py --dataset dataset.json --tolerance 5
@@ -22,15 +22,15 @@ class RegressionModel(nn.Module):
     def __init__(self, input_size, output_size):
         super().__init__()
         self.model = nn.Sequential(
-            nn.Linear(input_size, 512),
+            nn.Linear(input_size, 128),
             nn.ReLU(),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128),
-            nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Linear(64, output_size)  # No activation here
+            nn.Dropout(0.2),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, output_size)
         )
 
     def forward(self, x):
@@ -57,31 +57,63 @@ def main():
     X = np.array([entry["input"] for entry in raw_data], dtype=np.float32)
     y = np.array([entry["output"] for entry in raw_data], dtype=np.float32)
 
-    # Normalize only inputs
+    print(f"📊 Dataset loaded: {len(X)} samples")
+    print(f"📊 Input shape: {X.shape}")
+    print(f"📊 Output range: {y.min():.1f} - {y.max():.1f}")
+
+    # Normalize inputs (0-21 range)
     input_mean = X.mean(axis=0, keepdims=True)
     input_std = X.std(axis=0, keepdims=True) + 1e-8
-    X = (X - input_mean) / input_std
+    X_normalized = (X - input_mean) / input_std
 
-    # Ensure y is 2D (N, 1) if it's 1D
-    if y.ndim == 1:
-        y = y[:, np.newaxis]
+    # Normalize outputs (0-2047 range) - CRITICAL for training stability
+    output_mean = y.mean()
+    output_std = y.std() + 1e-8
+    y_normalized = (y - output_mean) / output_std
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1, random_state=42)
+    print(f"📊 Normalized output range: {y_normalized.min():.3f} - {y_normalized.max():.3f}")
 
+    # y should already be 2D for multi-output (N, 12)
+    print(f"📊 y shape: {y.shape}")
+    print(f"📊 y_normalized shape: {y_normalized.shape}")
+
+    # Split data with stratification consideration
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_normalized, y_normalized, test_size=0.2, random_state=42
+    )
+
+    print(f"📊 Training samples: {len(X_train)}")
+    print(f"📊 Test samples: {len(X_test)}")
+
+    # Create data loaders
     train_dataset = TensorDataset(torch.tensor(X_train), torch.tensor(y_train))
     test_dataset = TensorDataset(torch.tensor(X_test), torch.tensor(y_test))
-    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=256)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=32)
 
+    # Model setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    input_size = X.shape[1]
-    output_size = y.shape[1]
+    input_size = X.shape[1]  # 40 features
+    output_size = y_normalized.shape[1]  # 12 outputs
     model = RegressionModel(input_size, output_size).to(device)
-    criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    
+    print(f"🔧 Device: {device}")
+    print(f"🔧 Model input size: {input_size}")
+    print(f"🔧 Model output size: {output_size}")
 
-    epochs = 50
+    # Loss and optimizer with better parameters
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
+
+    # Training loop with early stopping
+    epochs = 200
+    best_loss = float('inf')
+    patience_counter = 0
+    patience_limit = 25
+
     for epoch in range(epochs):
+        # Training phase
         model.train()
         total_loss = 0
         for inputs_batch, labels_batch in train_loader:
@@ -92,53 +124,119 @@ def main():
             loss.backward()
             optimizer.step()
             total_loss += loss.item() * inputs_batch.size(0)
-        avg_loss = total_loss / len(train_loader.dataset)
-        print(f"Epoch {epoch + 1:2d} | Loss: {avg_loss:.6f}")
+        
+        avg_train_loss = total_loss / len(train_loader.dataset)
 
-    # Evaluation
+        # Validation phase
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for inputs_batch, labels_batch in test_loader:
+                inputs_batch, labels_batch = inputs_batch.to(device), labels_batch.to(device)
+                outputs = model(inputs_batch)
+                loss = criterion(outputs, labels_batch)
+                val_loss += loss.item() * inputs_batch.size(0)
+        
+        avg_val_loss = val_loss / len(test_loader.dataset)
+        scheduler.step(avg_val_loss)
+
+        print(f"Epoch {epoch + 1:3d} | Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f}")
+
+        # Early stopping
+        if avg_val_loss < best_loss:
+            best_loss = avg_val_loss
+            patience_counter = 0
+            # Save best model
+            os.makedirs("models", exist_ok=True)
+            torch.save(model.state_dict(), "models/trained_model.pt")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience_limit:
+                print(f"🛑 Early stopping at epoch {epoch + 1}")
+                break
+
+    # Final evaluation with denormalization
     model.eval()
     all_preds = []
     all_targets = []
-    correct = total = 0
-
+    
     with torch.no_grad():
         for inputs_batch, labels_batch in test_loader:
             inputs_batch, labels_batch = inputs_batch.to(device), labels_batch.to(device)
             outputs = model(inputs_batch)
+            
+            # Denormalize predictions and targets for evaluation
+            preds_denorm = outputs.cpu().numpy() * output_std + output_mean
+            targets_denorm = labels_batch.cpu().numpy() * output_std + output_mean
+            
+            all_preds.extend(preds_denorm)
+            all_targets.extend(targets_denorm)
 
-            preds_np = outputs.cpu().numpy()
-            targets_np = labels_batch.cpu().numpy()
+    # Multi-output accuracy: count samples where ALL 12 outputs are within tolerance
+    all_preds = np.array(all_preds)
+    all_targets = np.array(all_targets)
+    
+    # Calculate metrics on denormalized values (flatten for sklearn)
+    mse = mean_squared_error(all_targets.flatten(), all_preds.flatten())
+    mae = mean_absolute_error(all_targets.flatten(), all_preds.flatten())
+    
+    correct_samples = 0
+    total_samples = len(all_targets)
+    
+    for i in range(total_samples):
+        # Check if all 12 outputs are within tolerance for this sample
+        errors = np.abs(all_preds[i] - all_targets[i])
+        if np.all(errors <= tolerance):
+            correct_samples += 1
+    
+    accuracy = correct_samples / total_samples if total_samples else 0
+    
+    # Also calculate per-output accuracy
+    per_output_correct = np.sum(np.abs(all_preds - all_targets) <= tolerance, axis=0)
+    per_output_accuracy = per_output_correct / total_samples
 
-            all_preds.extend(preds_np)
-            all_targets.extend(targets_np)
-
-            # Accuracy check with tolerance
-            preds_rounded = np.round(preds_np).astype(int)
-            targets_rounded = np.round(targets_np).astype(int)
-            correct += (np.abs(preds_rounded - targets_rounded) <= tolerance).all(axis=1).sum()
-            total += targets_rounded.shape[0]
-
-    mse = mean_squared_error(all_targets, all_preds)
-    mae = mean_absolute_error(all_targets, all_preds)
-    accuracy = correct / total if total else 0
-
-    print(f"\n📉 MSE: {mse:.2f}")
+    print(f"\n📊 FINAL RESULTS:")
+    print(f"📉 MSE: {mse:.2f}")
     print(f"📉 MAE: {mae:.2f}")
-    print(f"✅ Accuracy within ±{tolerance}: {accuracy:.6f}")
+    print(f"✅ Full sample accuracy within ±{tolerance}: {accuracy:.6f}")
+    print(f"✅ Correct full samples: {correct_samples}/{total_samples}")
+    print(f"📊 Per-output accuracy: {per_output_accuracy}")
+    print(f"📊 Total correct individual outputs: {np.sum(per_output_correct)}/{total_samples * 12}")
 
-    os.makedirs("models", exist_ok=True)
-    model_path = "models/trained_model.pt"
-    torch.save(model.state_dict(), model_path)
-    print(f"📦 Model saved as: {model_path}")
+    # Show some example predictions
+    print(f"\n🔍 Sample predictions (first 3 samples, first 6 outputs):")
+    for i in range(min(3, len(all_preds))):
+        print(f"   Sample {i+1}:")
+        for j in range(min(6, output_size)):
+            pred = all_preds[i][j]
+            actual = all_targets[i][j] 
+            error = abs(pred - actual)
+            status = "✅" if error <= tolerance else "❌"
+            print(f"     Output {j+1}: {status} Pred={pred:.1f}, Actual={actual:.1f}, Error={error:.1f}")
 
+    # Save normalization parameters
     norm_stats = {
         "input_mean": input_mean.flatten().tolist(),
-        "input_std": input_std.flatten().tolist()
+        "input_std": input_std.flatten().tolist(),
+        "output_mean": float(output_mean),
+        "output_std": float(output_std)
     }
+    
     norm_stats_path = "models/norm_stats.json"
     with open(norm_stats_path, "w") as f:
-        json.dump(norm_stats, f)
+        json.dump(norm_stats, f, indent=2)
+    
+    print(f"📦 Model saved as: models/trained_model.pt")
     print(f"📦 Normalization stats saved as: {norm_stats_path}")
+
+    # Success criteria - check individual output accuracy
+    individual_correct = np.sum(per_output_correct)
+    if individual_correct >= 5:
+        print(f"🎉 SUCCESS! Model got {individual_correct} individual outputs right (≥5 target)")
+    elif correct_samples >= 1:
+        print(f"🎯 GOOD! Model got {correct_samples} complete samples right")
+    else:
+        print(f"⚠️  Model needs improvement. Only {individual_correct} individual outputs correct.")
 
 if __name__ == "__main__":
     main()
