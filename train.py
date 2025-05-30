@@ -9,7 +9,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from torch.utils.data import DataLoader, TensorDataset
 
-
 """
 This script trains a simple regression model on your dataset and outputs a `.pt` model and normalization stats.
 
@@ -19,23 +18,23 @@ Usage:
 – https://github.com/ihunna
 """
 
-
 class RegressionModel(nn.Module):
     def __init__(self, input_size, output_size):
         super().__init__()
         self.model = nn.Sequential(
-            nn.Linear(input_size, 256),
+            nn.Linear(input_size, 512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
             nn.ReLU(),
             nn.Linear(256, 128),
             nn.ReLU(),
             nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Linear(64, output_size)
+            nn.Linear(64, output_size)  # No activation here
         )
 
     def forward(self, x):
         return self.model(x)
-
 
 def main():
     parser = argparse.ArgumentParser(description="Train a regression model from JSON dataset")
@@ -58,14 +57,10 @@ def main():
     X = np.array([entry["input"] for entry in raw_data], dtype=np.float32)
     y = np.array([entry["output"] for entry in raw_data], dtype=np.float32)
 
-    # Normalize input and output
+    # Normalize only inputs
     input_mean = X.mean(axis=0, keepdims=True)
     input_std = X.std(axis=0, keepdims=True) + 1e-8
     X = (X - input_mean) / input_std
-
-    output_mean = y.mean()
-    output_std = y.std() + 1e-8
-    y = (y - output_mean) / output_std
 
     # Ensure y is 2D (N, 1) if it's 1D
     if y.ndim == 1:
@@ -98,7 +93,7 @@ def main():
             optimizer.step()
             total_loss += loss.item() * inputs_batch.size(0)
         avg_loss = total_loss / len(train_loader.dataset)
-        print(f"Epoch {epoch + 1}, Loss: {avg_loss:.6f}")
+        print(f"Epoch {epoch + 1:2d} | Loss: {avg_loss:.6f}")
 
     # Evaluation
     model.eval()
@@ -111,11 +106,8 @@ def main():
             inputs_batch, labels_batch = inputs_batch.to(device), labels_batch.to(device)
             outputs = model(inputs_batch)
 
-            preds_denorm = outputs * output_std + output_mean
-            targets_denorm = labels_batch * output_std + output_mean
-
-            preds_np = preds_denorm.cpu().numpy()
-            targets_np = targets_denorm.cpu().numpy()
+            preds_np = outputs.cpu().numpy()
+            targets_np = labels_batch.cpu().numpy()
 
             all_preds.extend(preds_np)
             all_targets.extend(targets_np)
@@ -141,15 +133,12 @@ def main():
 
     norm_stats = {
         "input_mean": input_mean.flatten().tolist(),
-        "input_std": input_std.flatten().tolist(),
-        "output_mean": output_mean.item() if np.isscalar(output_mean) else output_mean.tolist(),
-        "output_std": output_std.item() if np.isscalar(output_std) else output_std.tolist()
+        "input_std": input_std.flatten().tolist()
     }
     norm_stats_path = "models/norm_stats.json"
     with open(norm_stats_path, "w") as f:
         json.dump(norm_stats, f)
     print(f"📦 Normalization stats saved as: {norm_stats_path}")
-
 
 if __name__ == "__main__":
     main()
