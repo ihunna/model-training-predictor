@@ -52,68 +52,59 @@ def main():
         raw_data = json.load(f)
 
     if not isinstance(raw_data, list) or not all("input" in d and "output" in d for d in raw_data):
-        raise ValueError("❌ Dataset must be a list of {'input': [...], 'output': [...]} objects.")
+        raise ValueError("-- Dataset must be a list of {'input': [...], 'output': [...]} objects.")
 
     X = np.array([entry["input"] for entry in raw_data], dtype=np.float32)
     y = np.array([entry["output"] for entry in raw_data], dtype=np.float32)
 
-    print(f"📊 Dataset loaded: {len(X)} samples")
-    print(f"📊 Input shape: {X.shape}")
-    print(f"📊 Output range: {y.min():.1f} - {y.max():.1f}")
+    print(f"-- Dataset loaded: {len(X)} samples")
+    print(f"-- Input shape: {X.shape}")
+    print(f"-- Output range: {y.min():.1f} - {y.max():.1f}")
 
-    # Normalize inputs (0-21 range)
     input_mean = X.mean(axis=0, keepdims=True)
     input_std = X.std(axis=0, keepdims=True) + 1e-8
     X_normalized = (X - input_mean) / input_std
 
-    # Normalize outputs (0-2047 range) - CRITICAL for training stability
     output_mean = y.mean()
     output_std = y.std() + 1e-8
     y_normalized = (y - output_mean) / output_std
 
-    print(f"📊 Normalized output range: {y_normalized.min():.3f} - {y_normalized.max():.3f}")
+    print(f"-- Normalized output range: {y_normalized.min():.3f} - {y_normalized.max():.3f}")
 
-    # y should already be 2D for multi-output (N, 12)
-    print(f"📊 y shape: {y.shape}")
-    print(f"📊 y_normalized shape: {y_normalized.shape}")
+    print(f"-- y shape: {y.shape}")
+    print(f"-- y_normalized shape: {y_normalized.shape}")
 
-    # Split data with stratification consideration
     X_train, X_test, y_train, y_test = train_test_split(
         X_normalized, y_normalized, test_size=0.2, random_state=42
     )
 
-    print(f"📊 Training samples: {len(X_train)}")
-    print(f"📊 Test samples: {len(X_test)}")
+    print(f"-- Training samples: {len(X_train)}")
+    print(f"-- Test samples: {len(X_test)}")
 
-    # Create data loaders
     train_dataset = TensorDataset(torch.tensor(X_train), torch.tensor(y_train))
     test_dataset = TensorDataset(torch.tensor(X_test), torch.tensor(y_test))
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=32)
 
-    # Model setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_size = X.shape[1]  # 40 features
     output_size = y_normalized.shape[1]  # 12 outputs
     model = RegressionModel(input_size, output_size).to(device)
     
-    print(f"🔧 Device: {device}")
-    print(f"🔧 Model input size: {input_size}")
-    print(f"🔧 Model output size: {output_size}")
+    print(f"-- Device: {device}")
+    print(f"-- Model input size: {input_size}")
+    print(f"-- Model output size: {output_size}")
 
-    # Loss and optimizer with better parameters
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
 
-    # Training loop with early stopping
     epochs = 200
     best_loss = float('inf')
     patience_counter = 0
     patience_limit = 25
 
     for epoch in range(epochs):
-        # Training phase
         model.train()
         total_loss = 0
         for inputs_batch, labels_batch in train_loader:
@@ -127,7 +118,6 @@ def main():
         
         avg_train_loss = total_loss / len(train_loader.dataset)
 
-        # Validation phase
         model.eval()
         val_loss = 0
         with torch.no_grad():
@@ -142,20 +132,17 @@ def main():
 
         print(f"Epoch {epoch + 1:3d} | Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f}")
 
-        # Early stopping
         if avg_val_loss < best_loss:
             best_loss = avg_val_loss
             patience_counter = 0
-            # Save best model
             os.makedirs("models", exist_ok=True)
             torch.save(model.state_dict(), "models/trained_model.pt")
         else:
             patience_counter += 1
             if patience_counter >= patience_limit:
-                print(f"🛑 Early stopping at epoch {epoch + 1}")
+                print(f"-- Early stopping at epoch {epoch + 1}")
                 break
 
-    # Final evaluation with denormalization
     model.eval()
     all_preds = []
     all_targets = []
@@ -165,18 +152,15 @@ def main():
             inputs_batch, labels_batch = inputs_batch.to(device), labels_batch.to(device)
             outputs = model(inputs_batch)
             
-            # Denormalize predictions and targets for evaluation
             preds_denorm = outputs.cpu().numpy() * output_std + output_mean
             targets_denorm = labels_batch.cpu().numpy() * output_std + output_mean
             
             all_preds.extend(preds_denorm)
             all_targets.extend(targets_denorm)
 
-    # Multi-output accuracy: count samples where ALL 12 outputs are within tolerance
     all_preds = np.array(all_preds)
     all_targets = np.array(all_targets)
     
-    # Calculate metrics on denormalized values (flatten for sklearn)
     mse = mean_squared_error(all_targets.flatten(), all_preds.flatten())
     mae = mean_absolute_error(all_targets.flatten(), all_preds.flatten())
     
@@ -184,27 +168,24 @@ def main():
     total_samples = len(all_targets)
     
     for i in range(total_samples):
-        # Check if all 12 outputs are within tolerance for this sample
         errors = np.abs(all_preds[i] - all_targets[i])
         if np.all(errors <= tolerance):
             correct_samples += 1
     
     accuracy = correct_samples / total_samples if total_samples else 0
     
-    # Also calculate per-output accuracy
     per_output_correct = np.sum(np.abs(all_preds - all_targets) <= tolerance, axis=0)
     per_output_accuracy = per_output_correct / total_samples
 
-    print(f"\n📊 FINAL RESULTS:")
-    print(f"📉 MSE: {mse:.2f}")
-    print(f"📉 MAE: {mae:.2f}")
-    print(f"✅ Full sample accuracy within ±{tolerance}: {accuracy:.6f}")
-    print(f"✅ Correct full samples: {correct_samples}/{total_samples}")
-    print(f"📊 Per-output accuracy: {per_output_accuracy}")
-    print(f"📊 Total correct individual outputs: {np.sum(per_output_correct)}/{total_samples * 12}")
+    print(f"\n-- FINAL RESULTS:")
+    print(f"-- MSE: {mse:.2f}")
+    print(f"-- MAE: {mae:.2f}")
+    print(f"-- Full sample accuracy within ±{tolerance}: {accuracy:.6f}")
+    print(f"-- Correct full samples: {correct_samples}/{total_samples}")
+    print(f"-- Per-output accuracy: {per_output_accuracy}")
+    print(f"-- Total correct individual outputs: {np.sum(per_output_correct)}/{total_samples * 12}")
 
-    # Show some example predictions
-    print(f"\n🔍 Sample predictions (first 3 samples, first 6 outputs):")
+    print(f"\n-- Sample predictions (first 3 samples, first 6 outputs):")
     for i in range(min(3, len(all_preds))):
         print(f"   Sample {i+1}:")
         for j in range(min(6, output_size)):
@@ -214,7 +195,6 @@ def main():
             status = "✅" if error <= tolerance else "❌"
             print(f"     Output {j+1}: {status} Pred={pred:.1f}, Actual={actual:.1f}, Error={error:.1f}")
 
-    # Save normalization parameters
     norm_stats = {
         "input_mean": input_mean.flatten().tolist(),
         "input_std": input_std.flatten().tolist(),
@@ -226,15 +206,14 @@ def main():
     with open(norm_stats_path, "w") as f:
         json.dump(norm_stats, f, indent=2)
     
-    print(f"📦 Model saved as: models/trained_model.pt")
-    print(f"📦 Normalization stats saved as: {norm_stats_path}")
+    print(f"-- Model saved as: models/trained_model.pt")
+    print(f"-- Normalization stats saved as: {norm_stats_path}")
 
-    # Success criteria - check individual output accuracy
     individual_correct = np.sum(per_output_correct)
     if individual_correct >= 5:
-        print(f"🎉 SUCCESS! Model got {individual_correct} individual outputs right (≥5 target)")
+        print(f"-- SUCCESS! Model got {individual_correct} individual outputs right (≥5 target)")
     elif correct_samples >= 1:
-        print(f"🎯 GOOD! Model got {correct_samples} complete samples right")
+        print(f"-- GOOD! Model got {correct_samples} complete samples right")
     else:
         print(f"⚠️  Model needs improvement. Only {individual_correct} individual outputs correct.")
 

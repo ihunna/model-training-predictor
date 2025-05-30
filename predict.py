@@ -32,7 +32,6 @@ class RegressionModel(torch.nn.Module):
 def load_model_and_stats():
     """Load the trained model and normalization statistics."""
     
-    # Load normalization parameters
     try:
         with open("models/norm_stats.json", "r") as f:
             norm_stats = json.load(f)
@@ -44,10 +43,9 @@ def load_model_and_stats():
     output_mean = norm_stats["output_mean"]
     output_std = norm_stats["output_std"]
     
-    # Load model
     try:
-        input_size = len(input_mean)  # Should be 40
-        output_size = 12  # Multi-output
+        input_size = len(input_mean) 
+        output_size = 12 
         model = RegressionModel(input_size, output_size)
         model.load_state_dict(torch.load("models/trained_model.pt", map_location='cpu'))
         model.eval()
@@ -59,36 +57,30 @@ def load_model_and_stats():
 def predict_single(input_vector, model, input_mean, input_std, output_mean, output_std):
     """Make prediction for a single input vector."""
     
-    # Convert to numpy array
     input_array = np.array(input_vector, dtype=np.float32)
     
     if len(input_array) != len(input_mean):
         raise ValueError(f"❌ Input size mismatch. Expected {len(input_mean)}, got {len(input_array)}")
     
-    # Normalize input
     input_normalized = (input_array - input_mean) / input_std
     
-    # Make prediction
     with torch.no_grad():
         input_tensor = torch.tensor(input_normalized, dtype=torch.float32).unsqueeze(0)
         output_normalized = model(input_tensor).squeeze().numpy()
     
-    # Denormalize output
+
     outputs = output_normalized * output_std + output_mean
     
     return outputs.tolist()
 
 def test_on_dataset():
     """Test the model on the original dataset."""
-    
-    # Load dataset
     try:
         with open("dataset.json", "r") as f:
             dataset = json.load(f)
     except FileNotFoundError:
         raise FileNotFoundError("❌ Dataset not found.")
     
-    # Load model and stats
     model, input_mean, input_std, output_mean, output_std = load_model_and_stats()
     
     print("🧪 Testing model on dataset...")
@@ -109,7 +101,7 @@ def test_on_dataset():
         sample_correct = True
         sample_correct_count = 0
         
-        print(f"\n📊 Sample {i+1}:")
+        print(f"\n-- Sample {i+1}:")
         for j in range(len(actual_outputs)):
             error = abs(predicted_outputs[j] - actual_outputs[j])
             is_correct = error <= tolerance
@@ -133,13 +125,13 @@ def test_on_dataset():
     output_accuracy = total_correct_outputs / total_outputs
     
     print("=" * 80)
-    print(f"📊 RESULTS:")
+    print(f"-- RESULTS:")
     print(f"   Complete samples correct: {correct_samples}/{len(dataset)} ({sample_accuracy:.1%})")
     print(f"   Individual outputs correct: {total_correct_outputs}/{total_outputs} ({output_accuracy:.1%})")
     print(f"   Tolerance: ±{tolerance}")
     
     if total_correct_outputs >= 5:
-        print("🎉 SUCCESS! Model achieved the target of 5+ correct individual outputs!")
+        print("-- SUCCESS! Model achieved the target of 5+ correct individual outputs!")
     else:
         print("⚠️  Model needs improvement to reach 5+ correct individual outputs.")
     
@@ -168,8 +160,8 @@ def main():
             # Make prediction
             predictions = predict_single(input_vector, model, input_mean, input_std, output_mean, output_std)
             
-            print(f"🔮 Input (first 10): {input_vector[:10]}")
-            print(f"📊 Predictions (12 outputs):")
+            print(f"-- Input (first 10): {input_vector[:10]}")
+            print(f"-- Predictions (12 outputs):")
             for i, pred in enumerate(predictions):
                 print(f"   Output {i+1:2d}: {pred:6.1f}")
             
