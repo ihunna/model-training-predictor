@@ -213,148 +213,69 @@ def train_with_progress(model, train_loader, test_loader, config, device):
                 torch.cuda.empty_cache()
             gc.collect()
 
-    total_time = time.time() - start_time
-    print(f"\n⏱️ Training completed in {total_time/60:.1f} minutes (best val loss={best_loss:.6f})")
-    return best_loss
+    print(f"\n✅ Training complete. Best val loss: {best_loss:.6f}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Train a regression model from JSON dataset")
-    parser.add_argument("--dataset", type=str, default="dataset.json", help="Path to dataset JSON file")
-    parser.add_argument("--tolerance", type=int, default=5, help="Tolerance for ± accuracy check")
-    parser.add_argument("--max_samples", type=int, default=None, help="Max number of samples (for large datasets)")
-    parser.add_argument("--batch_size", type=int, default=None, help="Override auto batch size")
-    parser.add_argument("--force_cpu", action="store_true", help="Force CPU even if GPU is available")
+    parser = argparse.ArgumentParser(description="Train regression model with memory-efficient config")
+    parser.add_argument('--dataset', required=True, help="Path to JSON dataset file")
+    parser.add_argument('--max_samples', type=int, default=None, help="Max number of samples to load (for large datasets)")
+    parser.add_argument('--tolerance', type=float, default=5.0, help="Tolerance for accuracy metric")
     args = parser.parse_args()
 
-    dataset_path = args.dataset
-    tolerance = args.tolerance
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"🚀 Using device: {device}")
 
-    if not os.path.exists(dataset_path):
-        raise FileNotFoundError(f"❌ {dataset_path} not found.")
+    raw_data = load_dataset_efficiently(args.dataset, args.max_samples)
 
-    raw_data = load_dataset_efficiently(dataset_path, args.max_samples)
-    if not isinstance(raw_data, list) or not all("input" in d and "output" in d for d in raw_data):
-        raise ValueError("Dataset must be a list of {'input': [...], 'output': [...]} objects.")
+    # Extract inputs and targets
+    inputs = np.array([item['input'] for item in raw_data], dtype=np.float32)
+    targets = np.array([item['target'] for item in raw_data], dtype=np.float32)
 
-    # Build X, y
-    X = np.array([item["input"] for item in raw_data], dtype=np.float32)  # shape: (N, 40)
-    y = np.array([item["output"] for item in raw_data], dtype=np.float32)  # shape: (N, 12)
+    # No normalization on outputs (0-2047 targets)
+    # inputs normalization optional but recommended
+    input_mean = inputs.mean(axis=0)
+    input_std = inputs.std(axis=0) + 1e-8
+    inputs = (inputs - input_mean) / input_std
 
-    # Ensure y is 2D for PyTorch (N, 12)
-    if y.ndim == 1:
-        y = y[:, np.newaxis]
+    print(f"🔢 Dataset shape: inputs {inputs.shape}, targets {targets.shape}")
 
-    print(f"-- Dataset loaded: {len(X)} samples")
-    print(f"-- Input shape: {X.shape} (each ∈ [0,21])")
-    print(f"-- Output shape: {y.shape} (each ∈ [0,2047])")
+    config = get_optimal_config(len(inputs), device)
 
-    # Device setup
-    device = torch.device("cpu" if args.force_cpu else ("cuda" if torch.cuda.is_available() else "cpu"))
-    print(f"-- Device: {device}")
+    train_loader, test_loader, X_train, X_test, y_train, y_test = create_data_loaders(inputs, targets, config)
 
-    # Determine training config
-    config = get_optimal_config(len(X), device)
-    if args.batch_size:
-        config['batch_size'] = args.batch_size
-        print(f"🔧 Overriding batch size to {args.batch_size}")
+    model = RegressionModel(input_size=inputs.shape[1], output_size=targets.shape[1]).to(device)
 
-    # Normalize inputs only (0–21 → [-1,1] roughly)
-    input_mean = X.mean(axis=0, keepdims=True)
-    input_std = X.std(axis=0, keepdims=True) + 1e-8
-    X_norm = (X - input_mean) / input_std
+    train_with_progress(model, train_loader, test_loader, config, device)
 
-    # **Removed output normalization** — training on raw y:
-    y_norm = y  # no transform
-
-    # Show some stats
-    print(f"-- Normalized input range: {X_norm.min():.3f} to {X_norm.max():.3f}")
-    print(f"-- Raw output range: {y_norm.min():.1f} to {y_norm.max():.1f}")
-
-    # Create DataLoaders
-    train_loader, test_loader, X_train, X_test, y_train, y_test = create_data_loaders(
-        X_norm, y_norm, config
-    )
-    print(f"-- Training samples: {len(X_train)}, Test samples: {len(X_test)}")
-
-    # Build model
-    input_size = X.shape[1]    # should be 40
-    output_size = y.shape[1]   # should be 12
-    model = RegressionModel(input_size, output_size).to(device)
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"-- Model parameters: {total_params:,}")
-
-    # Train
-    best_loss = train_with_progress(model, train_loader, test_loader, config, device)
-
-    # Load best‐saved model and evaluate on test set
-    model.load_state_dict(torch.load("models/trained_model.pt", map_location=device))
+    # Load best model for evaluation
+    model.load_state_dict(torch.load("models/trained_model.pt"))
     model.eval()
 
-    print("\n📊 Final Evaluation on Test Set:")
     all_preds = []
     all_targets = []
+
+    tolerance = args.tolerance
+
     with torch.no_grad():
         eval_iter = tqdm(test_loader, desc="Evaluating") if config['use_progress_bar'] else test_loader
         for Xb, yb in eval_iter:
             Xb, yb = Xb.to(device), yb.to(device)
             preds = model(Xb)
-            all_preds.extend(preds.cpu().numpy())
-            all_targets.extend(yb.cpu().numpy())
+            all_preds.append(preds.cpu().numpy())
+            all_targets.append(yb.cpu().numpy())
 
-    all_preds = np.array(all_preds)      # shape: (n_test, 12)
-    all_targets = np.array(all_targets)  # shape: (n_test, 12)
+    all_preds = np.vstack(all_preds)
+    all_targets = np.vstack(all_targets)
 
-    # Compute metrics (raw scale)
-    mse = mean_squared_error(all_targets.flatten(), all_preds.flatten())
-    mae = mean_absolute_error(all_targets.flatten(), all_preds.flatten())
-    print(f"-- MSE: {mse:.2f}, MAE: {mae:.2f}")
+    mse = mean_squared_error(all_targets, all_preds)
+    mae = mean_absolute_error(all_targets, all_preds)
 
-    # Count how many samples have all 12 outputs within ±tolerance
-    correct_samples = 0
-    for i in range(len(all_targets)):
-        if np.all(np.abs(all_preds[i] - all_targets[i]) <= tolerance):
-            correct_samples += 1
-    total_samples = len(all_targets)
-    full_acc = correct_samples / total_samples if total_samples else 0
-    print(f"-- Full‐sample accuracy (all 12 within ±{tolerance}): {full_acc:.6f} ({correct_samples}/{total_samples})")
+    within_tolerance = np.abs(all_preds - all_targets) <= tolerance
+    tolerance_accuracy = np.mean(np.all(within_tolerance, axis=1)) * 100
 
-    # Per‐output accuracy
-    per_output_correct = np.sum(np.abs(all_preds - all_targets) <= tolerance, axis=0)
-    per_output_acc = per_output_correct / total_samples
-    print(f"-- Per‐output accuracy (±{tolerance}): {per_output_acc}")
-
-    # Show a few sample predictions
-    sample_count = min(3, total_samples)
-    print(f"\n-- Sample predictions (first {sample_count} samples, first 6 outputs):")
-    for i in range(sample_count):
-        print(f"   Sample {i+1}:")
-        for j in range(min(6, output_size)):
-            pred_val = all_preds[i][j]
-            actual_val = all_targets[i][j]
-            err = abs(pred_val - actual_val)
-            status = "✅" if err <= tolerance else "❌"
-            print(f"     Output {j+1}: {status} Pred={pred_val:.1f}, Actual={actual_val:.1f}, Error={err:.1f}")
-
-    # Save normalization stats (only inputs; outputs are raw)
-    norm_stats = {
-        "input_mean": input_mean.flatten().tolist(),
-        "input_std": input_std.flatten().tolist()
-    }
-    os.makedirs("models", exist_ok=True)
-    with open("models/norm_stats.json", "w") as f:
-        json.dump(norm_stats, f, indent=2)
-
-    print(f"\n💾 Files saved:")
-    print(f"-- Model: models/trained_model.pt")
-    print(f"-- Normalization stats (inputs only): models/norm_stats.json")
-    print(f"-- Best validation loss: {best_loss:.6f}")
-
-    # Final success check
-    if correct_samples >= 5:
-        print(f"\n🎉 SUCCESS! At least 5 test samples had all 12 outputs correct (>=5/10)")
-    else:
-        print(f"\n⚠️ Model did not meet the 5/10 full-sample success criterion. ({correct_samples} correct out of {total_samples})")
-    print(f"📈 End of training.")
+    print(f"\n📈 MSE: {mse:.4f}")
+    print(f"📈 MAE: {mae:.4f}")
+    print(f"📈 % predictions within ±{tolerance}: {tolerance_accuracy:.2f}%\n")
 
 if __name__ == "__main__":
     main()
