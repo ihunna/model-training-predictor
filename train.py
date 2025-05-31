@@ -10,7 +10,13 @@ from torch.utils.data import DataLoader, TensorDataset
 import time
 import psutil
 import gc
-from tqdm import tqdm
+
+# Use tqdm.notebook when available (e.g. in Colab), otherwise fall back to standard tqdm
+try:
+    from tqdm.notebook import tqdm
+except ImportError:
+    from tqdm import tqdm
+
 
 class RegressionModel(nn.Module):
     def __init__(self, input_size, output_size, hidden_dims=[128, 64, 32], dropout=0.0):
@@ -28,6 +34,7 @@ class RegressionModel(nn.Module):
 
     def forward(self, x):
         return self.model(x)
+
 
 def get_optimal_config(num_samples, device):
     """Automatic config based on dataset size and hardware."""
@@ -68,36 +75,48 @@ def get_optimal_config(num_samples, device):
         })
     return config
 
+
 def load_dataset_efficiently(dataset_path, max_samples=None):
-    file_size_mb = os.path.getsize(dataset_path) / (1024*1024)
+    """Load JSON dataset, optionally limiting to a maximum number of samples."""
+    file_size_mb = os.path.getsize(dataset_path) / (1024 * 1024)
     if file_size_mb > 100:
+        # For very large files, load entire JSON and sample if needed
         with open(dataset_path, 'r') as f:
             raw_data = json.load(f)
         if max_samples and len(raw_data) > max_samples:
-            indices = np.linspace(0, len(raw_data)-1, max_samples, dtype=int)
+            indices = np.linspace(0, len(raw_data) - 1, max_samples, dtype=int)
             raw_data = [raw_data[i] for i in indices]
     else:
         with open(dataset_path, 'r') as f:
             raw_data = json.load(f)
     return raw_data
 
+
 def create_data_loaders(X, y, config, test_size=0.2):
+    """Split X/y and return PyTorch DataLoaders with the given batch size, etc."""
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
     train_dataset = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                   torch.tensor(y_train, dtype=torch.float32))
     test_dataset = TensorDataset(torch.tensor(X_test, dtype=torch.float32),
                                  torch.tensor(y_test, dtype=torch.float32))
-    train_loader = DataLoader(train_dataset,
-                              batch_size=config['batch_size'],
-                              shuffle=True,
-                              num_workers=config['num_workers'],
-                              pin_memory=config['pin_memory'],
-                              drop_last=len(train_dataset) > config['batch_size'])
-    test_loader = DataLoader(test_dataset,
-                             batch_size=config['batch_size'],
-                             num_workers=config['num_workers'],
-                             pin_memory=config['pin_memory'])
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config['batch_size'],
+        shuffle=True,
+        num_workers=config['num_workers'],
+        pin_memory=config['pin_memory'],
+        drop_last=len(train_dataset) > config['batch_size']
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=config['batch_size'],
+        num_workers=config['num_workers'],
+        pin_memory=config['pin_memory']
+    )
+
     return train_loader, test_loader, X_train, X_test, y_train, y_test
+
 
 def train_model(
     dataset_path,
@@ -112,9 +131,13 @@ def train_model(
     batch_size=None,
     use_progress_bar=True,
 ):
+    """
+    Loads data, builds model, trains with SmoothL1Loss, and evaluates on test set.
+    Returns a dict with mse, mae, and percent within tolerance.
+    """
     raw_data = load_dataset_efficiently(dataset_path, max_samples)
 
-    # Determine target key
+    # Determine which key holds the target values
     possible_target_keys = ['target', 'output', 'label', 'y']
     target_key = None
     for key in possible_target_keys:
@@ -122,14 +145,14 @@ def train_model(
             target_key = key
             break
     if target_key is None:
-        raise RuntimeError("Could not determine target key in dataset")
+        raise RuntimeError("Could not determine target key in dataset; check JSON format.")
 
     X = np.array([item['input'] for item in raw_data])
     y = np.array([item[target_key] for item in raw_data])
-    if len(y.shape) == 1:
+    if y.ndim == 1:
         y = y.reshape(-1, 1)
 
-    # Config defaults
+    # Get or override training config
     config = get_optimal_config(len(raw_data), device)
     if batch_size:
         config['batch_size'] = batch_size
@@ -137,9 +160,16 @@ def train_model(
         config['max_epochs'] = max_epochs
     config['use_progress_bar'] = use_progress_bar
 
-    train_loader, test_loader, X_train, X_test, y_train, y_test = create_data_loaders(X, y, config)
+    # Create DataLoaders
+    train_loader, test_loader, _, X_test, _, y_test = create_data_loaders(X, y, config)
 
-    model = RegressionModel(input_size=X.shape[1], output_size=y.shape[1], hidden_dims=hidden_dims, dropout=dropout).to(device)
+    # Build model with best hidden dims and dropout
+    model = RegressionModel(
+        input_size=X.shape[1],
+        output_size=y.shape[1],
+        hidden_dims=hidden_dims,
+        dropout=dropout
+    ).to(device)
 
     criterion = nn.SmoothL1Loss()
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -151,13 +181,18 @@ def train_model(
     patience_limit = 25
     start_time = time.time()
 
+    # Choose correct tqdm based on environment
     epoch_iterator = tqdm(range(epochs), desc="Training") if config['use_progress_bar'] else range(epochs)
 
     for epoch in epoch_iterator:
         model.train()
         total_loss = 0.0
         num_batches = 0
-        batch_iter = tqdm(train_loader, leave=False, desc=f"Epoch {epoch+1}") if config['use_progress_bar'] else train_loader
+
+        batch_iter = (
+            tqdm(train_loader, leave=False, desc=f"Epoch {epoch+1}")
+            if config['use_progress_bar'] else train_loader
+        )
         for inputs_batch, labels_batch in batch_iter:
             inputs_batch, labels_batch = inputs_batch.to(device), labels_batch.to(device)
             optimizer.zero_grad()
@@ -168,6 +203,8 @@ def train_model(
             optimizer.step()
             total_loss += loss.item()
             num_batches += 1
+
+            # Free up memory periodically
             if config['memory_efficient'] and num_batches % 100 == 0:
                 if device.type == 'cuda':
                     torch.cuda.empty_cache()
@@ -175,6 +212,7 @@ def train_model(
 
         avg_train_loss = total_loss / num_batches
 
+        # Validation (on held-out test set)
         model.eval()
         val_loss = 0.0
         val_batches = 0
@@ -188,6 +226,7 @@ def train_model(
         avg_val_loss = val_loss / (val_batches if val_batches else 1)
         scheduler.step(avg_val_loss)
 
+        # Update progress bar or print periodically
         if config['use_progress_bar']:
             epoch_iterator.set_postfix({
                 'train_loss': f'{avg_train_loss:.6f}',
@@ -197,8 +236,12 @@ def train_model(
         elif epoch % 10 == 0 or epoch < 5:
             elapsed = time.time() - start_time
             eta = elapsed * (epochs / (epoch + 1)) - elapsed
-            print(f"Epoch {epoch + 1:3d} | Train: {avg_train_loss:.6f} | Val: {avg_val_loss:.6f} | ETA: {eta/60:.1f}m")
+            print(
+                f"Epoch {epoch + 1:3d} | "
+                f"Train: {avg_train_loss:.6f} | Val: {avg_val_loss:.6f} | ETA: {eta/60:.1f}m"
+            )
 
+        # Save best and early stop
         if avg_val_loss < best_loss:
             best_loss = avg_val_loss
             patience_counter = 0
@@ -219,23 +262,38 @@ def train_model(
                 torch.cuda.empty_cache()
             gc.collect()
 
-    # Final evaluation on test
+    # Final evaluation on the test set
     model.eval()
     with torch.no_grad():
         preds = model(torch.tensor(X_test, dtype=torch.float32).to(device)).cpu().numpy()
 
     mse = mean_squared_error(y_test, preds)
     mae = mean_absolute_error(y_test, preds)
-    within_tol = np.mean(np.abs(y_test - preds) <= tolerance)
+    within_tol = np.mean(np.abs(preds - y_test) <= tolerance)
 
     return {'mse': mse, 'mae': mae, 'accuracy': within_tol}
+
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Train regression model with memory-efficient config")
-    parser.add_argument('--dataset', required=True, help="Path to JSON dataset file")
-    parser.add_argument('--max_samples', type=int, default=None, help="Max number of samples to load (for large datasets)")
-    parser.add_argument('--tolerance', type=float, default=5.0, help="Tolerance for accuracy metric")
+    parser.add_argument(
+        '--dataset',
+        required=True,
+        help="Path to JSON dataset file"
+    )
+    parser.add_argument(
+        '--max_samples',
+        type=int,
+        default=None,
+        help="Max number of samples to load (for large datasets)"
+    )
+    parser.add_argument(
+        '--tolerance',
+        type=float,
+        default=5.0,
+        help="Tolerance for accuracy metric"
+    )
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -248,7 +306,7 @@ def main():
         tolerance=args.tolerance,
         use_progress_bar=True,
 
-        # Best hyperparameters applied here
+        # Best hyperparameters from the sweep:
         lr=0.001,
         batch_size=16,
         dropout=0.0,
@@ -257,7 +315,9 @@ def main():
     )
 
     print("Training complete.")
-    print(f"MSE: {results['mse']:.4f}, MAE: {results['mae']:.4f}, Accuracy (within tolerance): {results['accuracy']:.4f}")
+    print(f"MSE: {results['mse']:.4f}, MAE: {results['mae']:.4f}, "
+          f"Accuracy (within tolerance): {results['accuracy']:.4f}")
+
 
 if __name__ == "__main__":
     main()
