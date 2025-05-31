@@ -227,9 +227,20 @@ def main():
 
     raw_data = load_dataset_efficiently(args.dataset, args.max_samples)
 
-    # Extract inputs and targets
+    # Helper to get a key that exists in the first item for targets
+    possible_target_keys = ['target', 'output', 'label', 'y']
+
+    target_key = None
+    for key in possible_target_keys:
+        if key in raw_data[0]:
+            target_key = key
+            break
+    if target_key is None:
+        raise KeyError(f"None of the keys {possible_target_keys} found in data items. Please check your dataset format.")
+
+    # Extract inputs and targets safely
     inputs = np.array([item['input'] for item in raw_data], dtype=np.float32)
-    targets = np.array([item['target'] for item in raw_data], dtype=np.float32)
+    targets = np.array([item[target_key] for item in raw_data], dtype=np.float32)
 
     # No normalization on outputs (0-2047 targets)
     # inputs normalization optional but recommended
@@ -276,6 +287,7 @@ def main():
     print(f"\n📈 MSE: {mse:.4f}")
     print(f"📈 MAE: {mae:.4f}")
     print(f"📈 % predictions within ±{tolerance}: {tolerance_accuracy:.2f}%\n")
+
 
 if __name__ == "__main__":
     main()
