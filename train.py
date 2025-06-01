@@ -13,14 +13,12 @@ import gc
 
 # Use tqdm.notebook when available
 try:
-    from tqdm.notebook import tqdm
-except ImportError:
     from tqdm import tqdm
+except ImportError:
+    from tqdm.notebook import tqdm
 
 
 class RegressionModel(nn.Module):
-    """Simple feedforward neural network for regression."""
-
     def __init__(self, input_size, output_size, hidden_dims=[128, 64, 32], dropout=0.0):
         super().__init__()
         layers = []
@@ -39,8 +37,7 @@ class RegressionModel(nn.Module):
 
 
 def get_optimal_config(num_samples, device):
-    """Determine optimal training configuration based on dataset size and device."""
-    available_ram = psutil.virtual_memory().available / (1024**3)  # in GB
+    available_ram = psutil.virtual_memory().available / (1024**3)
     config = {
         'batch_size': 32,
         'num_workers': 0,
@@ -51,10 +48,7 @@ def get_optimal_config(num_samples, device):
     }
 
     if num_samples < 1000:
-        config.update({
-            'batch_size': min(32, max(8, num_samples // 10)),
-            'max_epochs': 200
-        })
+        config.update({'batch_size': min(32, max(8, num_samples // 10)), 'max_epochs': 200})
     elif num_samples < 50000:
         config.update({
             'batch_size': 64 if available_ram > 4 else 32,
@@ -76,10 +70,20 @@ def get_optimal_config(num_samples, device):
 
 
 def load_dataset_efficiently(dataset_path, max_samples=None):
-    """Efficiently load JSON dataset, optionally sampling for large files."""
-    file_size_mb = os.path.getsize(dataset_path) / (1024 * 1024)
-    with open(dataset_path, 'r') as f:
-        raw_data = json.load(f)
+    try:
+        with open(dataset_path, 'r') as f:
+            raw_data = json.load(f)
+    except json.JSONDecodeError:
+        print("Warning: JSON too large, switching to line-by-line mode.")
+        raw_data = []
+        with open(dataset_path, 'r') as f:
+            for i, line in enumerate(f):
+                if max_samples and i >= max_samples:
+                    break
+                try:
+                    raw_data.append(json.loads(line.strip()))
+                except json.JSONDecodeError:
+                    continue
     if max_samples and len(raw_data) > max_samples:
         indices = np.linspace(0, len(raw_data) - 1, max_samples, dtype=int)
         raw_data = [raw_data[i] for i in indices]
@@ -87,7 +91,6 @@ def load_dataset_efficiently(dataset_path, max_samples=None):
 
 
 def create_data_loaders(X, y, config, test_size=0.2):
-    """Split data and create PyTorch DataLoaders."""
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
 
     train_dataset = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
@@ -114,6 +117,14 @@ def create_data_loaders(X, y, config, test_size=0.2):
     return train_loader, test_loader, X_train, X_test, y_train, y_test
 
 
+def detect_target_key(sample):
+    """Detect target key in sample dict."""
+    for key in ['target', 'output', 'label', 'y']:
+        if key in sample:
+            return key
+    raise RuntimeError("Target key not found. Expected one of: 'target', 'output', 'label', 'y'")
+
+
 def train_model(
     dataset_path,
     device,
@@ -127,14 +138,8 @@ def train_model(
     batch_size=None,
     use_progress_bar=True,
 ):
-    """Main training loop for regression model."""
-
     raw_data = load_dataset_efficiently(dataset_path, max_samples)
-
-    # Determine the key for the target variable
-    target_key = next((k for k in ['target', 'output', 'label', 'y'] if k in raw_data[0]), None)
-    if not target_key:
-        raise RuntimeError("Target key not found in dataset. Expected one of: 'target', 'output', 'label', 'y'.")
+    target_key = detect_target_key(raw_data[0])
 
     X = np.asarray([item['input'] for item in raw_data], dtype=np.float32)
     y = np.asarray([item[target_key] for item in raw_data], dtype=np.float32)
@@ -194,7 +199,6 @@ def train_model(
         avg_val_loss = val_loss / len(test_loader)
         scheduler.step(avg_val_loss)
 
-        # Logging
         if config['use_progress_bar']:
             epoch_iterator.set_postfix({
                 'train_loss': f'{avg_train_loss:.6f}',
@@ -235,7 +239,6 @@ def train_model(
 
 
 def main():
-    """CLI entrypoint."""
     import argparse
     parser = argparse.ArgumentParser(description="Train regression model with memory-efficient config")
     parser.add_argument('--dataset', required=True, help="Path to JSON dataset file")
@@ -259,9 +262,10 @@ def main():
         weight_decay=1e-6
     )
 
-    print("Training complete.")
-    print(f"MSE: {results['mse']:.4f}, MAE: {results['mae']:.4f}, "
-          f"Accuracy (within tolerance): {results['accuracy']:.4f}")
+    print("\nTraining complete.")
+    print(f"MSE: {results['mse']:.4f}")
+    print(f"MAE: {results['mae']:.4f}")
+    print(f"Accuracy (within tolerance): {results['accuracy']:.4f}")
 
 
 if __name__ == "__main__":
