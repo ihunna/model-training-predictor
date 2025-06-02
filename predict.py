@@ -1,4 +1,4 @@
-import json
+import json,os
 import torch
 import numpy as np
 import argparse
@@ -11,6 +11,8 @@ Usage:
     python predict.py --input "[1,2,3,...,40]" (40 values)
     python predict.py --test_dataset
 """
+
+dataset_path = 'dataset.json' if os.path.exists("dataset.json") else '/content/dataset.json'
 
 class RegressionModel(torch.nn.Module):
     def __init__(self, input_size, output_size, hidden_dims=[128, 64, 32], dropout=0.1):
@@ -34,7 +36,7 @@ def load_model_and_stats():
     """Load the trained model and recompute normalization statistics from dataset."""
     # Recompute normalization stats directly from dataset.json
     try:
-        with open("dataset.json", "r") as f:
+        with open(dataset_path, "r") as f:
             raw_data = json.load(f)
     except FileNotFoundError:
         raise FileNotFoundError("❌ Dataset not found. Please ensure 'dataset.json' is present.")
@@ -58,10 +60,10 @@ def load_model_and_stats():
 
     # Load the saved state_dict from best_model.pth
     try:
-        state_dict = torch.load("best_model.pth", map_location="cpu")
+        state_dict = torch.load("models/best_model.pt", map_location="cpu")
         model.load_state_dict(state_dict)
     except FileNotFoundError:
-        raise FileNotFoundError("❌ Trained model not found. Please train the model first (best_model.pth).")
+        raise FileNotFoundError("❌ Trained model not found. Please train the model first (best_model.pt).")
 
     model.eval()
     return model, input_mean.flatten(), input_std.flatten(), output_mean.flatten(), output_std.flatten()
@@ -87,7 +89,7 @@ def predict_single(input_vector, model, input_mean, input_std, output_mean, outp
 def test_on_dataset():
     """Test the model on the original dataset and show performance."""
     try:
-        with open("dataset.json", "r") as f:
+        with open(dataset_path, "r") as f:
             dataset = json.load(f)
     except FileNotFoundError:
         raise FileNotFoundError("❌ Dataset not found.")

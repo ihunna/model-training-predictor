@@ -204,7 +204,7 @@ def main():
         if avg_val_loss < best_loss:
             best_loss = avg_val_loss
             patience_counter = 0
-            torch.save(model.state_dict(), "best_model.pth")
+            torch.save(model.state_dict(), "models/best_model.pt")
         else:
             patience_counter += 1
 
@@ -215,7 +215,7 @@ def main():
         gc.collect()
 
     print("\n-- Training finished.")
-    model.load_state_dict(torch.load("best_model.pth"))
+    model.load_state_dict(torch.load("models/best_model.pt"))
 
     # Evaluate final model on test set
     model.eval()
