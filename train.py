@@ -125,7 +125,6 @@ def main():
     y_normalized = (y - output_mean) / output_std
 
     print(f"-- Normalized output range: {y_normalized.min():.3f} - {y_normalized.max():.3f}")
-
     print(f"-- y shape: {y.shape}")
     print(f"-- y_normalized shape: {y_normalized.shape}")
 
@@ -151,7 +150,9 @@ def main():
                              num_workers=config['num_workers'], pin_memory=config['pin_memory'])
 
     input_size = X.shape[1]
-    output_size = y_normalized.shape[1]
+    output_size = y_normalized.shape[1] if len(y_normalized.shape) > 1 else 1  # ✅ fix
+
+    os.makedirs("models", exist_ok=True)  # ✅ ensure directory exists
     model = RegressionModel(input_size, output_size, dropout=0.1).to(device)
 
     criterion = nn.MSELoss()
@@ -178,9 +179,7 @@ def main():
             outputs = model(inputs_batch)
             loss = criterion(outputs, labels_batch)
             loss.backward()
-
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
             optimizer.step()
             total_loss += loss.item() * inputs_batch.size(0)
 
@@ -204,6 +203,7 @@ def main():
         if avg_val_loss < best_loss:
             best_loss = avg_val_loss
             patience_counter = 0
+            os.makedirs("models", exist_ok=True)  # ✅ ensure directory exists before saving
             torch.save(model.state_dict(), "models/best_model.pt")
         else:
             patience_counter += 1
@@ -245,6 +245,7 @@ def main():
     accuracy = rounded_correct / total_values * 100
 
     print(f"Rounded Accuracy (within ±{tolerance}): {accuracy:.2f}%")
+
 
 if __name__ == "__main__":
     main()
